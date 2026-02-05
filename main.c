@@ -18,6 +18,7 @@
 #define I2C_SDA_A 0
 #define I2C_SCL_A 1
 #define BOT_A 5
+#define BOT_B 6
 #define I2C_PORT_B i2c1
 #define I2C_SDA_B 14
 #define I2C_SCL_B 15
@@ -29,6 +30,7 @@ AHT20_Data data;
 int temperature = 0;
 float humidity = 0;
 float media = 0;
+volatile int temp_offset_centi = 0;
 char str_tmp[5];  
 char str_umi[5]; 
 typedef struct checks{
@@ -42,8 +44,15 @@ typedef struct WD_checks{
     uint16_t error001;
     uint16_t error002;
     uint16_t error003;
+    uint16_t error004;
 } WD_checks;
-WD_checks wdc = {0, 0, 0};
+WD_checks wdc = {0, 0, 0, 0};
+
+typedef struct live_checks {
+    uint32_t core_0;
+    uint32_t core_1;
+} live_checks;
+live_checks alive = {0, 0};
 
 uint8_t slice = 0;
 typedef struct {
@@ -72,8 +81,10 @@ void wd_errors(uint16_t x, bool positive); // Verifica onde foi que ativou o wat
 
 
 int main() {
+    wd_errors(3, 1);
     stdio_init_all();
     if (watchdog_caused_reboot()) {
+        sleep_ms(10000);
         uint32_t reset_count = watchdog_hw->scratch[0]; // scratch mantém valor entre resets por watchdog
         reset_count++;
         watchdog_hw->scratch[0] = reset_count;
@@ -81,11 +92,16 @@ int main() {
         printf("Erro001 - %d", wdc.error001);
         printf("Erro002 - %d", wdc.error002);
         printf("Erro003 - %d", wdc.error003);
+        printf("Erro004 - %d", wdc.error004);
     } else {
         printf(">>> Reset normal (Power On). Iniciando contador em 0.\n");
-        // watchdog_hw->scratch[0] = 0;
+        watchdog_hw->scratch[0] = 0;
+        watchdog_hw->scratch[1] = 0;
+        watchdog_hw->scratch[2] = 0;
+        watchdog_hw->scratch[3] = 0;
+        watchdog_hw->scratch[4] = 0;
     }
-    watchdog_enable(4000, true); //Sistema watchdog contra falhas. Caso o programa trave por mais de 4 segundos sem o watchdog_update resetar, o programa é forçado a reiniciar.
+    watchdog_enable(8000, true); //Sistema watchdog contra falhas. Caso o programa trave por mais de 4 segundos sem o watchdog_update resetar, o programa é forçado a reiniciar.
     mutex_init(&data_mutex);
     multicore_launch_core1(core1);
     init_botoes();
@@ -93,26 +109,33 @@ int main() {
     init_aht20();
     pwm_setup();
     
-    gpio_set_irq_enabled_with_callback(BOT_A, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);   
-
+    gpio_set_irq_enabled_with_callback(BOT_A, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
+    gpio_set_irq_enabled_with_callback(BOT_B, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
+    wd_errors(3, 0);
     while (true) {
-        wd_errors(1,1);
+        wd_errors(1, 1);
+        alive.core_0 = to_ms_since_boot(get_absolute_time());
         // Leitura do AHT20
         if (aht20_read(I2C_PORT_A, &data)) {
             c.error3 = true;
             printf("Temperatura AHT: %.2f C\n", data.temperature);
             printf("Umidade: %.2f %%\n\n\n", data.humidity);
-            sprintf(str_tmp, "%.1fC", data.temperature);
+            mutex_enter_blocking(&data_mutex);
+            float temp_display = data.temperature + (temp_offset_centi / 100.0f);
+            temperature = (int)lroundf(temp_display * 100.0f);
+            sprintf(str_tmp, "%.1fC", temp_display);
             sprintf(str_umi, "%.1f%%", data.humidity);
+            mutex_exit(&data_mutex);
         } else {
             printf("Erro na leitura do AHT10!\n\n\n");
             c.error3 = false;
         }
-        if(!c.error2 && !c.error3) {c.error1 = true;}
-        else {c.error1 = false;}
+        if(!c.error2 && !c.error3) {
+            c.error1 = true;
+        } else {
+            c.error1 = false;
+        }
 
-        mutex_exit(&data_mutex);
- 
         if ((temperature < 1000 || temperature > 4000) && !pw.alarm_state && pw.alarm_react) {
             pw.alarm_pwm = add_alarm_in_ms(3000, variacao_temp, NULL, false);
             pw.alarm_state = true;
@@ -127,21 +150,24 @@ int main() {
             pw.alarm_react = true;
         }
         media = ((temperature/100.0) + data.temperature)/2 ;
-
+        if ((alive.core_0 - alive.core_1) < 4000) {
+            watchdog_update();
+        }
         sleep_ms(1);
-        watchdog_update();
-        wd_errors(1,0); 
+        wd_errors(1, 0); 
     }
 }
 
-
 void core1(void) {
+    wd_errors(4, 1);
     sleep_ms(5000);
     bool cor = true;
     init_i2c1();
     init_oled();
-    
+    wd_errors(4, 0);
     while(true) {
+        wd_errors(2, 1);
+        alive.core_1 = to_ms_since_boot(get_absolute_time());
         ssd1306_fill(&ssd, !cor);                          
         ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);      
         ssd1306_line(&ssd, 3, 38, 123, 38, cor); // Linha Umidade e Temp Cima 
@@ -164,7 +190,8 @@ void core1(void) {
         }
         mutex_exit(&data_mutex);
         ssd1306_send_data(&ssd);
-        sleep_ms(1000);
+        wd_errors(2, 0);
+        sleep_ms(500);
     }
 }
 
@@ -234,6 +261,10 @@ void gpio_irq_handler(uint gpio, uint32_t events) {
         cancel_alarm(pw.alarm_pwm);
         last_time_a = current_time;
     }
+    if(gpio == BOT_B && (current_time - last_time_b > 300)) {
+        temp_offset_centi = (temp_offset_centi == 0) ? 3500 : 0; // +35.0C para simular alarme
+        last_time_b = current_time;
+    }
 }
 
 int64_t variacao_temp(alarm_id_t, void *user_data) {
@@ -253,6 +284,7 @@ void wd_errors (uint16_t x, bool positive){
                 wdc.error001--;
                 watchdog_hw->scratch[1] = wdc.error001;
             }
+            break;
             
         case 2:
             if (positive) {
@@ -264,6 +296,7 @@ void wd_errors (uint16_t x, bool positive){
                 wdc.error002--;
                 watchdog_hw->scratch[2] = wdc.error002;
             }
+            break;
             
         case 3:
             if (positive) {
@@ -275,5 +308,18 @@ void wd_errors (uint16_t x, bool positive){
                 wdc.error003--;
                 watchdog_hw->scratch[3] = wdc.error003;
             }
+            break;
+        
+        case 4:
+            if(positive){
+                wdc.error004 = watchdog_hw->scratch[4];
+                wdc.error004++;
+                watchdog_hw->scratch[4] = wdc.error004;
+            } else {
+                wdc.error004 = watchdog_hw->scratch[4];
+                wdc.error004--;
+                watchdog_hw->scratch[4] = wdc.error004;
+            }
+            break;
     }
 }

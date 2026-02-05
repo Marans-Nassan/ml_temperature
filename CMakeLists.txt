@@ -19,7 +19,7 @@ cmake_minimum_required(VERSION 3.13)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(PICO_BOARD pico2 CACHE STRING "Board type")
+set(PICO_BOARD pico_w CACHE STRING "Board type")
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
 include(pico_sdk_import.cmake)
@@ -47,7 +47,6 @@ pico_enable_stdio_usb(${PROJECT_NAME} 1)
 # Add the standard library to the build
 target_link_libraries(${PROJECT_NAME}
         pico_stdlib
-        hardware_pwm
         pico_multicore
         hardware_i2c
         hardware_pwm
