@@ -48,7 +48,7 @@ typedef struct WD_checks{
 } WD_checks;
 WD_checks wdc = {0, 0, 0, 0};
 
-typedef struct live_checks {
+typedef struct live_checks { // Variáveis responsáveis por manter o watchdog vivo.
     uint32_t core_0;
     uint32_t core_1;
 } live_checks;
@@ -85,7 +85,7 @@ int main() {
     stdio_init_all();
     if (watchdog_caused_reboot()) {
         sleep_ms(10000);
-        uint32_t reset_count = watchdog_hw->scratch[0]; // scratch mantém valor entre resets por watchdog
+        uint16_t reset_count = watchdog_hw->scratch[0]; // scratch mantém valor entre resets por watchdog
         reset_count++;
         watchdog_hw->scratch[0] = reset_count;
         printf("\n\n>>> Reiniciado pelo Watchdog! Contagem de resets: %d\n", reset_count);
@@ -170,14 +170,11 @@ void core1(void) {
         alive.core_1 = to_ms_since_boot(get_absolute_time());
         ssd1306_fill(&ssd, !cor);                          
         ssd1306_rect(&ssd, 3, 3, 122, 60, cor, !cor);      
-        ssd1306_line(&ssd, 3, 38, 123, 38, cor); // Linha Umidade e Temp Cima 
-        ssd1306_line(&ssd, 3, 50, 123, 50, cor); // Linha Umidade e Temp Baixo
-        ssd1306_line(&ssd, 3, 15, 123, 15, cor); // Linha Data e Hora Cima
-        ssd1306_line(&ssd, 3, 27, 123, 27, cor); // Linha Data e Hora Baixo              
-        ssd1306_draw_string(&ssd, "Data:", 7, 6);
-        ssd1306_draw_string(&ssd, "Hora:", 7, 18);  
+        ssd1306_line(&ssd, 3, 38, 123, 38, cor); 
+        ssd1306_line(&ssd, 3, 50, 123, 50, cor); 
+        ssd1306_line(&ssd, 3, 15, 123, 15, cor); 
+        ssd1306_line(&ssd, 3, 27, 123, 27, cor);          
         ssd1306_draw_string(&ssd, " UMI    TEMP", 10, 41); 
-        ssd1306_draw_string(&ssd, "Alarme:", 7, 30);  
         ssd1306_line(&ssd, 63, 39, 63, 60, cor); // Linha Central         
  
         mutex_enter_blocking(&data_mutex);                
@@ -261,7 +258,7 @@ void gpio_irq_handler(uint gpio, uint32_t events) {
         cancel_alarm(pw.alarm_pwm);
         last_time_a = current_time;
     }
-    if(gpio == BOT_B && (current_time - last_time_b > 300)) {
+    if(gpio == BOT_B && (current_time - last_time_b > 300)) { //Testes com o Botão... se pensar em alguma função pra ele também tá bom.
         temp_offset_centi = (temp_offset_centi == 0) ? 3500 : 0; // +35.0C para simular alarme
         last_time_b = current_time;
     }
