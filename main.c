@@ -13,7 +13,6 @@
 #include "hardware/watchdog.h"
 #include "hardware/structs/watchdog.h"
 
-/* Headers C (ssd1306/aht20) usados em um TU C++ (main.c compilado como C++) */
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -26,14 +25,12 @@ extern "C" {
 }
 #endif
 
-/* TFLite Micro */
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
 #include "autoencoder_temperatura_float.h"
 
-/* ----------------- HW defs ----------------- */
 #define I2C_PORT_A i2c0
 #define I2C_SDA_A 0
 #define I2C_SCL_A 1
@@ -51,7 +48,7 @@ extern "C" {
 ssd1306_t ssd;
 AHT20_Data data;
 
-int temperature = 0;         /* centi-°C */
+int temperature = 0; 
 float humidity = 0;
 float media = 0;
 volatile int temp_offset_centi = 0;
