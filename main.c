@@ -93,25 +93,44 @@ pwm_struct pw = {7812.5f, 32.0f, false, true, 0};
 mutex_t data_mutex;
 
 /* ----------------- ML params ----------------- */
-#define ML_WINDOW 20
+#define ML_WINDOW 60
+#define COND_STABLE_SECONDS 10
+#define COND_STABLE_DELTA 0.5f
+#define COND_ANOM_DELTA 2.0f
+#define COND_SEVERE_DELTA 2.0f
+#define COND_SEVERE_WINDOW_MS 60000
 
 static const float kTempMin[ML_WINDOW] = {
-    23.518806f, 23.501051f, 23.398729f, 23.345318f,
-    23.482470f, 23.350306f, 23.482172f, 23.507483f,
-    23.464437f, 23.338785f, 23.399324f, 23.281837f,
-    23.465727f, 23.429327f, 23.211569f, 23.501291f,
-    23.508408f, 23.430216f, 23.373257f, 23.394426f
+    24.000195f, 23.800744f, 23.753186f, 23.651148f, 23.478117f,
+    23.543856f, 23.423320f, 23.454261f, 23.414481f, 23.445453f,
+    23.336992f, 23.253057f, 23.183236f, 23.202494f, 23.139543f,
+    23.078896f, 23.082267f, 23.049465f, 22.967841f, 22.862567f,
+    22.753356f, 22.851117f, 22.832863f, 22.758146f, 22.657734f,
+    22.523301f, 22.451465f, 22.307808f, 22.264346f, 22.193564f,
+    22.115642f, 22.239464f, 22.215062f, 22.196853f, 22.325051f,
+    22.189177f, 22.140474f, 21.985550f, 21.992578f, 22.053292f,
+    21.853292f, 21.939291f, 21.970395f, 21.974044f, 21.849859f,
+    21.927053f, 22.095343f, 22.054594f, 22.022848f, 22.025123f,
+    21.985177f, 21.967361f, 22.070211f, 22.063579f, 22.092584f,
+    22.292584f, 22.320498f, 22.287693f, 22.242896f, 22.101548f
 };
 
 static const float kTempMax[ML_WINDOW] = {
-    25.340790f, 25.398533f, 25.382153f, 25.563015f,
-    25.485449f, 25.382772f, 25.364466f, 25.525917f,
-    25.507328f, 25.608130f, 25.403925f, 25.622328f,
-    25.527430f, 25.765596f, 25.698732f, 25.681974f,
-    25.662485f, 25.911837f, 25.718164f, 25.771938f
+    24.999672f, 25.163015f, 25.359282f, 25.421523f, 25.478898f,
+    25.443300f, 25.435772f, 25.566029f, 25.600808f, 25.565483f,
+    25.584186f, 25.559955f, 25.615816f, 25.732980f, 25.729611f,
+    25.721083f, 25.785393f, 25.901790f, 25.958078f, 25.870097f,
+    26.068803f, 26.015706f, 25.982192f, 26.052790f, 26.171842f,
+    26.257239f, 26.298726f, 26.345055f, 26.349406f, 26.405220f,
+    26.205220f, 26.292078f, 26.337232f, 26.368740f, 26.357379f,
+    26.367425f, 26.482223f, 26.650305f, 26.802097f, 26.794899f,
+    26.885127f, 26.855321f, 26.849877f, 26.920392f, 26.862736f,
+    26.910096f, 26.847646f, 26.794115f, 26.873489f, 26.783930f,
+    26.677477f, 26.733249f, 26.684430f, 26.656430f, 26.581355f,
+    26.592485f, 26.656157f, 26.770851f, 26.763900f, 26.878825f
 };
 
-static const float kAnomalyThreshold = 0.030335f;
+static const float kAnomalyThreshold = 0.007699098f;
 
 /* Ring buffer */
 static float temp_window[ML_WINDOW];
@@ -122,6 +141,12 @@ static int win_head = 0;
 static volatile bool ml_ready = false;
 static volatile bool ml_anomaly = false;
 static volatile float ml_last_mse = 0.0f;
+
+/* Baseline dinâmico */
+static bool baseline_valid = false;
+static float baseline_temp = 0.0f;
+static uint32_t baseline_time_ms = 0;
+static volatile bool baseline_request = true;
 
 /* TFLM runtime */
 static const tflite::Model *model = NULL;
@@ -226,6 +251,8 @@ int main() {
 
                 push_temp(temp_display);
 
+                bool cond_anom = false;
+                bool cond_severe = false;
                 if (win_count >= ML_WINDOW) {
                     float w[ML_WINDOW];
                     get_window_ordered(w);
@@ -238,16 +265,57 @@ int main() {
 
                     mutex_enter_blocking(&data_mutex);
                     snprintf(str_mse, sizeof(str_mse), "MSE:%0.3f", mse);
-                    snprintf(str_sta, sizeof(str_sta), "%s", anom ? "ANOMALIA" : "NORMAL");
+                    float min10 = w[ML_WINDOW - COND_STABLE_SECONDS];
+                    float max10 = min10;
+                    float sum10 = 0.0f;
+                    for (int i = ML_WINDOW - COND_STABLE_SECONDS; i < ML_WINDOW; i++) {
+                        float v = w[i];
+                        if (v < min10) {
+                            min10 = v;
+                        }
+                        if (v > max10) {
+                            max10 = v;
+                        }
+                        sum10 += v;
+                    }
+                    float mean10 = sum10 / (float)COND_STABLE_SECONDS;
+                    bool stable10 = (max10 - min10) <= COND_STABLE_DELTA;
+
+                    if (baseline_request && stable10) {
+                        baseline_temp = mean10;
+                        baseline_time_ms = now_ms;
+                        baseline_valid = true;
+                        baseline_request = false;
+                    } else if (!baseline_valid) {
+                        baseline_valid = false;
+                    }
+
+                    float delta = w[ML_WINDOW - 1] - baseline_temp;
+                    bool cond_anom = baseline_valid && (fabsf(delta) >= COND_ANOM_DELTA);
+                    bool cond_severe = baseline_valid &&
+                                       (delta >= COND_SEVERE_DELTA) &&
+                                       ((now_ms - baseline_time_ms) <= COND_SEVERE_WINDOW_MS);
+
+                    bool final_anom = anom || cond_anom || cond_severe;
+
+                    if (!baseline_valid) {
+                        snprintf(str_sta, sizeof(str_sta), "CALIB");
+                    } else if (cond_severe) {
+                        snprintf(str_sta, sizeof(str_sta), "SEVERA");
+                    } else if (final_anom) {
+                        snprintf(str_sta, sizeof(str_sta), "ANOMALIA");
+                    } else {
+                        snprintf(str_sta, sizeof(str_sta), "NORMAL");
+                    }
                     mutex_exit(&data_mutex);
 
-                    if (anom && !pw.alarm_state && pw.alarm_react) {
+                    if ((anom || cond_anom || cond_severe) && !pw.alarm_state && pw.alarm_react) {
                         pw.alarm_pwm = add_alarm_in_ms(3000, variacao_temp, NULL, false);
                         pw.alarm_state = true;
                         pw.alarm_react = false;
                     }
 
-                    if (!anom) {
+                    if (!(anom || cond_anom || cond_severe)) {
                         if (pw.alarm_state) {
                             pwm_off();
                             pw.alarm_state = false;
@@ -259,7 +327,7 @@ int main() {
 
                 printf("Temp: %.2f C | Umi: %.2f %% | MSE: %.5f | %s\n",
                        data.temperature, data.humidity, (double)ml_last_mse,
-                       ml_anomaly ? "ANOM" : "OK");
+                       (ml_anomaly || cond_anom || cond_severe) ? "ANOM" : "OK");
             } else {
                 c.error3 = false;
                 printf("Erro na leitura do AHT20!\n");
@@ -407,7 +475,8 @@ void gpio_irq_handler(uint gpio, uint32_t events) {
     }
 
     if (gpio == BOT_B && (current_time - last_time_b > 300)) {
-        temp_offset_centi = (temp_offset_centi == 0) ? 3500 : 0;
+        baseline_request = true;
+        baseline_valid = false;
         last_time_b = current_time;
     }
 }
@@ -415,7 +484,7 @@ void gpio_irq_handler(uint gpio, uint32_t events) {
 int64_t variacao_temp(alarm_id_t, void *user_data) {
     (void)user_data;
     pwm_on(50);
-    return 1;
+    return 0;
 }
 
 void wd_errors(uint16_t x, bool positive) {
@@ -471,12 +540,6 @@ void wd_errors(uint16_t x, bool positive) {
 }
 
 static inline float clamp01(float x) {
-    if (x < 0.0f) {
-        return 0.0f;
-    }
-    if (x > 1.0f) {
-        return 1.0f;
-    }
     return x;
 }
 
