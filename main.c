@@ -56,7 +56,7 @@ volatile int temp_offset_centi = 0;
 char str_tmp[10];
 char str_umi[10];
 char str_mse[16];
-char str_sta[16];
+char str_sta[24];
 
 typedef struct checks {
     bool error1;
@@ -96,8 +96,8 @@ mutex_t data_mutex;
 #define ML_WINDOW 60
 #define COND_STABLE_SECONDS 10
 #define COND_STABLE_DELTA 0.5f
-#define COND_ANOM_DELTA 2.0f
-#define COND_SEVERE_DELTA 2.0f
+#define COND_ELEVADA_DELTA 2.0f
+#define COND_SEVERA_DELTA 5.0f
 #define COND_SEVERE_WINDOW_MS 60000
 
 static const float kTempMin[ML_WINDOW] = {
@@ -147,6 +147,7 @@ static bool baseline_valid = false;
 static float baseline_temp = 0.0f;
 static uint32_t baseline_time_ms = 0;
 static volatile bool baseline_request = true;
+static uint32_t baseline_request_time_ms = 0;
 
 /* TFLM runtime */
 static const tflite::Model *model = NULL;
@@ -154,36 +155,37 @@ static tflite::MicroInterpreter *interpreter = NULL;
 static TfLiteTensor *input = NULL;
 static TfLiteTensor *output = NULL;
 
-static constexpr int kTensorArenaSize = 20 * 1024;
+static constexpr int kTensorArenaSize = 60 * 1024;
 static uint8_t tensor_arena[kTensorArenaSize];
 
 /* --------------- Prototypes --------------- */
-void core1(void);
-void init_botoes(void);
-void init_i2c0(void);
-void init_i2c1(void);
-void init_oled(void);
-void init_aht20(void);
+void core1(void); /* Loop do core1: atualiza OLED e status */
+void init_botoes(void); /* Configura BOT_A/B com pull-up */
+void init_i2c0(void); /* I2C do AHT20 (sensores) */
+void init_i2c1(void); /* I2C do OLED */
+void init_oled(void); /* Inicializa display SSD1306 */
+void init_aht20(void); /* Reset e init do AHT20 */
 
-void pwm_setup(void);
-void pwm_on(uint8_t duty_cycle);
-void pwm_off(void);
+void pwm_setup(void); /* Configura PWM do buzzer */
+void pwm_on(uint8_t duty_cycle); /* Liga buzzer com duty */
+void pwm_off(void); /* Desliga buzzer */
 
-void gpio_irq_handler(uint gpio, uint32_t events);
-int64_t variacao_temp(alarm_id_t, void *user_data);
-void wd_errors(uint16_t x, bool positive);
+void gpio_irq_handler(uint gpio, uint32_t events); /* ISR dos botões */
+int64_t variacao_temp(alarm_id_t, void *user_data); /* Callback do alarme do buzzer */
+void wd_errors(uint16_t x, bool positive); /* Contadores de watchdog */
 
-static inline float clamp01(float x);
-static inline float minmax_scale(float x, int i);
-static void push_temp(float t);
-static void get_window_ordered(float out[ML_WINDOW]);
+static inline float clamp01(float x); /* Normaliza (atual: passthrough) */
+static inline float minmax_scale(float x, int i); /* MinMax por posição */
+static void push_temp(float t); /* Empilha temperatura no ring buffer */
+static void get_window_ordered(float out[ML_WINDOW]); /* Janela ordenada */
 
-static void ml_init(void);
-static bool ml_is_anomaly(const float window[ML_WINDOW], float *out_mse);
+static void ml_init(void); /* Inicializa TFLM */
+static bool ml_is_anomaly(const float window[ML_WINDOW], float *out_mse); /* Inferência + MSE */
 
 int main() {
     wd_errors(3, 1);
     stdio_init_all();
+    sleep_ms(3000);
 
     if (watchdog_caused_reboot()) {
         sleep_ms(3000);
@@ -251,7 +253,7 @@ int main() {
 
                 push_temp(temp_display);
 
-                bool cond_anom = false;
+                bool cond_elevada = false;
                 bool cond_severe = false;
                 if (win_count >= ML_WINDOW) {
                     float w[ML_WINDOW];
@@ -281,7 +283,9 @@ int main() {
                     float mean10 = sum10 / (float)COND_STABLE_SECONDS;
                     bool stable10 = (max10 - min10) <= COND_STABLE_DELTA;
 
-                    if (baseline_request && stable10) {
+                    if (baseline_request &&
+                        stable10 &&
+                        (now_ms - baseline_request_time_ms) >= (COND_STABLE_SECONDS * 1000)) {
                         baseline_temp = mean10;
                         baseline_time_ms = now_ms;
                         baseline_valid = true;
@@ -291,31 +295,31 @@ int main() {
                     }
 
                     float delta = w[ML_WINDOW - 1] - baseline_temp;
-                    bool cond_anom = baseline_valid && (fabsf(delta) >= COND_ANOM_DELTA);
+                    bool cond_elevada = baseline_valid && (fabsf(delta) >= COND_ELEVADA_DELTA);
                     bool cond_severe = baseline_valid &&
-                                       (delta >= COND_SEVERE_DELTA) &&
+                                       (fabsf(delta) >= COND_SEVERA_DELTA) &&
                                        ((now_ms - baseline_time_ms) <= COND_SEVERE_WINDOW_MS);
 
-                    bool final_anom = anom || cond_anom || cond_severe;
-
-                    if (!baseline_valid) {
+                    if (baseline_request || !baseline_valid) {
                         snprintf(str_sta, sizeof(str_sta), "CALIB");
                     } else if (cond_severe) {
-                        snprintf(str_sta, sizeof(str_sta), "SEVERA");
-                    } else if (final_anom) {
-                        snprintf(str_sta, sizeof(str_sta), "ANOMALIA");
+                        snprintf(str_sta, sizeof(str_sta), "ANOMALIA - SEVERA");
+                    } else if (cond_elevada) {
+                        snprintf(str_sta, sizeof(str_sta), "ANOMALIA - ELEVADA");
+                    } else if (anom) {
+                        snprintf(str_sta, sizeof(str_sta), "ANOMALIA - NORMAL");
                     } else {
                         snprintf(str_sta, sizeof(str_sta), "NORMAL");
                     }
                     mutex_exit(&data_mutex);
 
-                    if ((anom || cond_anom || cond_severe) && !pw.alarm_state && pw.alarm_react) {
+                    if ((anom || cond_elevada || cond_severe) && !pw.alarm_state && pw.alarm_react) {
                         pw.alarm_pwm = add_alarm_in_ms(3000, variacao_temp, NULL, false);
                         pw.alarm_state = true;
                         pw.alarm_react = false;
                     }
 
-                    if (!(anom || cond_anom || cond_severe)) {
+                    if (!(anom || cond_elevada || cond_severe)) {
                         if (pw.alarm_state) {
                             pwm_off();
                             pw.alarm_state = false;
@@ -327,7 +331,7 @@ int main() {
 
                 printf("Temp: %.2f C | Umi: %.2f %% | MSE: %.5f | %s\n",
                        data.temperature, data.humidity, (double)ml_last_mse,
-                       (ml_anomaly || cond_anom || cond_severe) ? "ANOM" : "OK");
+                       (ml_anomaly || cond_elevada || cond_severe) ? "ANOM" : "OK");
             } else {
                 c.error3 = false;
                 printf("Erro na leitura do AHT20!\n");
@@ -466,6 +470,7 @@ void gpio_irq_handler(uint gpio, uint32_t events) {
     uint64_t current_time = to_ms_since_boot(get_absolute_time());
     static uint64_t last_time_a = 0, last_time_b = 0;
 
+    /* BOT_A: silencia o alarme atual (rearmazena quando voltar ao normal) */
     if (gpio == BOT_A && (current_time - last_time_a > 300)) {
         pwm_off();
         pw.alarm_state = false;
@@ -474,9 +479,14 @@ void gpio_irq_handler(uint gpio, uint32_t events) {
         last_time_a = current_time;
     }
 
+    /* BOT_B: solicita recalibração do baseline (CALIB até estabilizar) */
     if (gpio == BOT_B && (current_time - last_time_b > 300)) {
         baseline_request = true;
         baseline_valid = false;
+        baseline_request_time_ms = (uint32_t)current_time;
+        mutex_enter_blocking(&data_mutex);
+        snprintf(str_sta, sizeof(str_sta), "CALIB");
+        mutex_exit(&data_mutex);
         last_time_b = current_time;
     }
 }
@@ -608,17 +618,31 @@ static bool ml_is_anomaly(const float window[ML_WINDOW], float *out_mse) {
         return false;
     }
 
+    static float input_copy[ML_WINDOW];
     for (int i = 0; i < ML_WINDOW; i++) {
-        input->data.f[i] = minmax_scale(window[i], i);
+        float v = minmax_scale(window[i], i);
+        input->data.f[i] = v;
+        input_copy[i] = v;
     }
 
-    if (interpreter->Invoke() != kTfLiteOk) {
+    TfLiteStatus invoke_status = interpreter->Invoke();
+    if (invoke_status != kTfLiteOk) {
+        printf("❌ Invoke falhou: %d\n", (int)invoke_status);
         return false;
+    }
+
+    static bool printed_debug = false;
+    if (!printed_debug) {
+        printed_debug = true;
+        printf("ML dims: in=%d out=%d\n",
+               (int)input->dims->data[1], (int)output->dims->data[1]);
+        printf("ML bytes: in=%d out=%d\n", (int)input->bytes, (int)output->bytes);
+        printf("ML ptrs: in=%p out=%p\n", (void *)input->data.f, (void *)output->data.f);
     }
 
     float mse = 0.0f;
     for (int i = 0; i < ML_WINDOW; i++) {
-        float diff = output->data.f[i] - input->data.f[i];
+        float diff = output->data.f[i] - input_copy[i];
         mse += diff * diff;
     }
     mse /= (float)ML_WINDOW;
