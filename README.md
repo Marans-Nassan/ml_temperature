@@ -25,14 +25,14 @@ O sistema foi desenvolvido com foco em **robustez, tempo real e confiabilidade**
 
 ### Multicore
 
-* **Core 0**:
+* Core 0:
 
   * Aquisição de dados do sensor
   * Processamento TinyML
   * Lógica de detecção de anomalias
   * Controle de alarmes
 
-* **Core 1**:
+* Core 1:
 
   * Atualização do display OLED
   * Exibição de status, MSE e leituras ambientais
